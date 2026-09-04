@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #16181c;
+        --muted: #5c6370;
+        --line: #dfe2e8;
+        --card: #f6f7f9;
+        --accent: #1a73e8;
+        --ok: #137333;
+        --warn: #a35200;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e8eaed;
+          --muted: #9aa0a6;
+          --line: #3c4043;
+          --card: #26282c;
+          --accent: #8ab4f8;
+          --ok: #81c995;
+          --warn: #fdd663;
+        }
+      }
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 14px;
+        font: 13px/1.45 system-ui, -apple-system, sans-serif;
+        color: var(--fg);
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 9px 0;
+      }
+      .status {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px 11px;
+        margin-bottom: 12px;
+        background: var(--card);
+      }
+      .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 7px;
+        background: var(--muted);
+        vertical-align: 1px;
+      }
+      .dot.ok { background: var(--ok); }
+      .dot.warn { background: var(--warn); }
+      .hint {
+        color: var(--muted);
+        margin: 4px 0 0 15px;
+        font-size: 12px;
+      }
+      .hint.sub {
+        margin: -2px 0 8px 0;
+        font-size: 11.5px;
+      }
+      details {
+        border-top: 1px solid var(--line);
+        padding-top: 10px;
+        margin-top: 4px;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--accent);
+        font-size: 12px;
+      }
+      code {
+        display: block;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 6px 7px;
+        margin: 7px 0 3px;
+        font-size: 10.5px;
+        word-break: break-all;
+        user-select: all;
+      }
+      p { margin: 8px 0; color: var(--muted); font-size: 12px; }
+      input[type="checkbox"] { width: 16px; height: 16px; }
+      select {
+        max-width: 172px;
+        padding: 5px 24px 5px 7px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--fg);
+        background: var(--card);
+        font: inherit;
+      }
+      button.primary {
+        width: 100%;
+        padding: 9px 12px;
+        margin-bottom: 4px;
+        border: none;
+        border-radius: 7px;
+        background: var(--accent);
+        color: #fff;
+        font: 500 13px system-ui, -apple-system, sans-serif;
+        cursor: pointer;
+      }
+      button.primary:disabled { opacity: .55; cursor: default; }
+      label { font-weight: 500; }
+    </style>
+  </head>
+  <body>
+    <h1>Meet Popout</h1>
+
+    <div class="status">
+      <div><span class="dot" id="dot"></span><span id="statusText">Checking…</span></div>
+      <div class="hint" id="statusHint"></div>
+      <div class="hint" id="controlsHint"></div>
+    </div>
+
+    <button id="popout" class="primary" hidden>Pop out with controls</button>
+    <div class="hint sub" id="popoutHint" hidden></div>
+
+    <div class="row">
+      <label for="videoSource">Pop out shows</label>
+      <select id="videoSource">
+        <option value="stage">Meeting stage</option>
+        <option value="screen">Shared screen</option>
+        <option value="self">My camera</option>
+        <option value="largest">Largest video tile</option>
+      </select>
+    </div>
+    <div class="hint sub">
+      Meeting stage prefers the active speaker or presentation instead of your
+      self-view. Shared screen falls back to the stage when nobody is presenting.
+    </div>
+
+    <div class="row">
+      <label for="enabled">Pop out on tab switch</label>
+      <input type="checkbox" id="enabled" />
+    </div>
+
+    <div class="row">
+      <label for="appSwitch">Also when leaving Firefox</label>
+      <input type="checkbox" id="appSwitch" />
+    </div>
+    <div class="hint sub">
+      Holds the meeting tab in the background with a placeholder tab, so it keeps
+      floating while you are in another app. Closes itself when you come back.
+    </div>
+
+    <div class="row">
+      <label for="showButton">Show "Pop out" button in Meet</label>
+      <input type="checkbox" id="showButton" />
+    </div>
+
+    <details open>
+      <summary>Required setup</summary>
+      <p>
+        This drives Firefox's own auto Picture-in-Picture, which ships turned
+        <b>off</b>. Open <b>about:config</b> and set this to <b>true</b> —
+        nothing works until you do:
+      </p>
+      <code>media.videocontrols.picture-in-picture.enable-when-switching-tabs.enabled</code>
+      <p>It is also in Settings → General → Browsing.</p>
+    </details>
+
+    <details>
+      <summary>Two kinds of popout</summary>
+      <p>
+        <b>With controls</b> — the same API Chrome's Meet uses. A real window
+        with mic, camera and hang-up buttons. It needs a click to open (Firefox
+        has no way to open one automatically), then stays up through tab and app
+        switches.
+      </p>
+      <p>
+        <b>Automatic</b> — opens by itself on a tab or app switch, but is
+        video-only. Its mute button still toggles your microphone. Camera and
+        hang-up are keyboard shortcuts, under Add-ons → gear → Manage Extension
+        Shortcuts.
+      </p>
+    </details>
+
+    <details>
+      <summary>Not popping out?</summary>
+      <p>
+        Set this to <b>true</b> as a fallback. It makes Firefox skip its
+        eligibility checks — note that it also lets other sites pop out on tab
+        switch.
+      </p>
+      <code>media.videocontrols.picture-in-picture.video-toggle.always-show</code>
+    </details>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

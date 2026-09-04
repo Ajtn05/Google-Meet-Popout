@@ -1,0 +1,74 @@
+{
+  "manifest_version": 3,
+  "name": "Meet Popout",
+  "version": "1.4.0",
+  "description": "Automatically pops Google Meet into a floating Picture-in-Picture window when you switch tabs, and puts it back when you return.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "meet-popout@local",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
+    }
+  },
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://meet.google.com/*"
+  ],
+  "background": {
+    "scripts": [
+      "src/background.js"
+    ]
+  },
+  "commands": {
+    "toggle-mic": {
+      "suggested_key": {
+        "default": "Alt+Shift+M",
+        "mac": "MacCtrl+Shift+M"
+      },
+      "description": "Google Meet: toggle microphone"
+    },
+    "toggle-camera": {
+      "suggested_key": {
+        "default": "Alt+Shift+V",
+        "mac": "MacCtrl+Shift+V"
+      },
+      "description": "Google Meet: toggle camera"
+    },
+    "leave-call": {
+      "description": "Google Meet: leave the call"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "Meet Popout",
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "48": "icons/icon.svg",
+      "96": "icons/icon.svg"
+    }
+  }
+}
