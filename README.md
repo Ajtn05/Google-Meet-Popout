@@ -84,9 +84,9 @@ Firefox's own auto-PiP does the rest.
 When Firefox regains focus, the extension reselects the meeting and closes the
 placeholder. That closure is the signal that returns the video to the page.
 
-This is a workaround and not a supported hook. It is therefore a separate
-switch in the toolbar popup. It is on by default. Turn it off if you do not
-want to see the extra tab.
+This is a workaround and not a supported hook. It is therefore a separate,
+optional switch in the toolbar popup and is off by default. Turn it on only if
+you want the meeting to keep floating after you leave Firefox.
 
 ## Required setup
 
@@ -145,7 +145,9 @@ Join a meeting, then switch to another tab. By default the popout shows the
 active speaker, or whatever else is on the main stage, including a screen
 share. Switch back to the meeting tab and the video returns to the page.
 
-Click the toolbar icon to select what the popout shows:
+Click the toolbar icon to choose what the popout shows. The choice is presented
+as four source cards so its fallback behaviour is visible before you leave the
+meeting:
 
 - **Meeting stage** (default) selects another participant or a presentation
   before your self-view.
@@ -155,7 +157,9 @@ Click the toolbar icon to select what the popout shows:
 - **Largest video tile** shows the largest visible tile.
 
 The extension saves your choice. The choice applies to the automatic popout
-and to the controls popout.
+and to the optional controls window. Screen-share detection uses the media
+track's display-capture data and, when Firefox does not retain it for a remote
+participant, the track label as a fallback.
 
 ## If no popout appears
 
@@ -208,24 +212,25 @@ mode is both automatic and fully controllable.
 | | Opens by itself | Real Meet buttons |
 | --- | --- | --- |
 | **With controls** (Document PiP) | No. Needs one click. | Yes |
-| **Automatic** (Firefox video PiP) | Yes, on a tab switch or an application switch | Mute only |
+| **Automatic** (Firefox video PiP) | Yes, on a tab switch; app switches are optional | Mute only |
 
 ### With controls
 
-Click **Pop out** in the meeting, or use the toolbar popup. The window shows
-live video and has microphone, camera and hang-up buttons. The button icons
-show Meet's real state. The window stays open through tab switches and
+Click the **Pop out** button in the meeting. It is shown by default and can be
+hidden from the toolbar popup. The window shows live video and has
+microphone, camera and hang-up buttons. The button icons show Meet's real
+state. The controls window stays open through tab switches and
 application switches, and it shows the active speaker. This mode replaces the
 automatic mode, so the shadow element and the placeholder tab are both
 inactive while the window is open.
 
+The controls window can also open before Meet has a visible video tile. It
+shows a waiting message and attaches the selected source when one becomes
+available.
+
 The window inherits Meet's Content Security Policy. The extension therefore
 builds the window's interface through the CSSOM instead of `<style>` elements,
 because a strict `style-src` rejects those elements.
-
-The click must happen *in the page*. A click in the toolbar popup does not
-give the page transient activation. The popup therefore arms the extension,
-and your next click in the meeting opens the window.
 
 ### Automatic
 
@@ -233,7 +238,9 @@ This mode needs no click, but it shows video only. Its mute button still
 controls your microphone. Firefox calls `setMuted()`. With no site wrapper
 present, that call sets `video.muted` on the shadow element, and the content
 script receives a `volumechange` event. The extension maps the state in both
-directions, so the icon shows whether your microphone is really muted.
+directions. It also watches the full Meet controls subtree, so the link
+survives a Meet control re-render while the tab is hidden. The shadow starts in
+the current Meet mute state rather than always starting muted.
 
 The camera and hang-up actions are keyboard shortcuts. Set them in Add-ons ->
 gear icon -> Manage Extension Shortcuts.
@@ -251,9 +258,10 @@ host.
 
 ## Known limitations
 
-- **An application switch parks a placeholder tab.** No better method exists
-  (see above). You see an extra tab in the tab strip while you are away. Turn
-  the switch off in the popup if you want tab switching only.
+- **Keeping the popout open after an application switch parks a placeholder
+  tab.** No better method exists (see above). The optional switch is off by
+  default. If you enable it, you see an extra tab in the tab strip while you
+  are away.
 - **If you change tabs while you are away**, Firefox leaves you on the tab you
   selected when you return. It does not return you to the meeting. The
   placeholder tab still closes.

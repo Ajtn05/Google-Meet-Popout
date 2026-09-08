@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Meet Popout",
-  "version": "1.4.0",
+  "version": "1.5.6",
   "description": "Automatically pops Google Meet into a floating Picture-in-Picture window when you switch tabs, and puts it back when you return.",
   "browser_specific_settings": {
     "gecko": {
@@ -57,6 +57,7 @@
         "https://meet.google.com/*"
       ],
       "js": [
+        "src/mute-state.js",
         "src/content.js"
       ],
       "run_at": "document_idle",

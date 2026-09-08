@@ -9,6 +9,7 @@
         --muted: #5c6370;
         --line: #dfe2e8;
         --card: #f6f7f9;
+        --card-hover: #eef4fe;
         --accent: #1a73e8;
         --ok: #137333;
         --warn: #a35200;
@@ -19,22 +20,28 @@
           --muted: #9aa0a6;
           --line: #3c4043;
           --card: #26282c;
+          --card-hover: #29354a;
           --accent: #8ab4f8;
           --ok: #81c995;
           --warn: #fdd663;
         }
       }
       body {
-        width: 320px;
+        width: 336px;
         margin: 0;
         padding: 14px;
         font: 13px/1.45 system-ui, -apple-system, sans-serif;
         color: var(--fg);
       }
       h1 {
-        margin: 0 0 10px;
-        font-size: 14px;
+        margin: 0 0 2px;
+        font-size: 16px;
         font-weight: 600;
+      }
+      .subtitle {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 12px;
       }
       .row {
         display: flex;
@@ -47,7 +54,7 @@
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 9px 11px;
-        margin-bottom: 12px;
+        margin-bottom: 14px;
         background: var(--card);
       }
       .dot {
@@ -67,8 +74,56 @@
         font-size: 12px;
       }
       .hint.sub {
-        margin: -2px 0 8px 0;
+        margin: 5px 0 0;
         font-size: 11.5px;
+      }
+      .section {
+        margin: 14px 0;
+      }
+      .section-title {
+        display: block;
+        margin-bottom: 7px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .source-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 7px;
+      }
+      .source-option {
+        display: block;
+        cursor: pointer;
+      }
+      .source-option input {
+        position: absolute;
+        opacity: 0;
+      }
+      .source-option span {
+        display: block;
+        min-height: 44px;
+        padding: 8px 9px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+      }
+      .source-option:hover span { background: var(--card-hover); }
+      .source-option input:checked + span {
+        border-color: var(--accent);
+        box-shadow: inset 0 0 0 1px var(--accent);
+        background: var(--card-hover);
+      }
+      .source-option input:focus-visible + span {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .source-option strong, .source-option small { display: block; }
+      .source-option strong { font-size: 12px; }
+      .source-option small {
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 10.5px;
+        line-height: 1.25;
       }
       details {
         border-top: 1px solid var(--line);
@@ -93,32 +148,12 @@
       }
       p { margin: 8px 0; color: var(--muted); font-size: 12px; }
       input[type="checkbox"] { width: 16px; height: 16px; }
-      select {
-        max-width: 172px;
-        padding: 5px 24px 5px 7px;
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        color: var(--fg);
-        background: var(--card);
-        font: inherit;
-      }
-      button.primary {
-        width: 100%;
-        padding: 9px 12px;
-        margin-bottom: 4px;
-        border: none;
-        border-radius: 7px;
-        background: var(--accent);
-        color: #fff;
-        font: 500 13px system-ui, -apple-system, sans-serif;
-        cursor: pointer;
-      }
-      button.primary:disabled { opacity: .55; cursor: default; }
       label { font-weight: 500; }
     </style>
   </head>
   <body>
     <h1>Meet Popout</h1>
+    <p class="subtitle">Choose what follows you when you leave the meeting.</p>
 
     <div class="status">
       <div><span class="dot" id="dot"></span><span id="statusText">Checking…</span></div>
@@ -126,22 +161,28 @@
       <div class="hint" id="controlsHint"></div>
     </div>
 
-    <button id="popout" class="primary" hidden>Pop out with controls</button>
-    <div class="hint sub" id="popoutHint" hidden></div>
-
-    <div class="row">
-      <label for="videoSource">Pop out shows</label>
-      <select id="videoSource">
-        <option value="stage">Meeting stage</option>
-        <option value="screen">Shared screen</option>
-        <option value="self">My camera</option>
-        <option value="largest">Largest video tile</option>
-      </select>
-    </div>
-    <div class="hint sub">
-      Meeting stage prefers the active speaker or presentation instead of your
-      self-view. Shared screen falls back to the stage when nobody is presenting.
-    </div>
+    <section class="section" aria-labelledby="sourceTitle">
+      <span class="section-title" id="sourceTitle">What should the popout show?</span>
+      <div class="source-grid" role="radiogroup" aria-labelledby="sourceTitle">
+        <label class="source-option">
+          <input type="radio" name="videoSource" value="stage" />
+          <span><strong>Meeting stage</strong><small>Speaker or presentation</small></span>
+        </label>
+        <label class="source-option">
+          <input type="radio" name="videoSource" value="screen" />
+          <span><strong>Shared screen</strong><small>Falls back to stage</small></span>
+        </label>
+        <label class="source-option">
+          <input type="radio" name="videoSource" value="self" />
+          <span><strong>My camera</strong><small>Your self-view</small></span>
+        </label>
+        <label class="source-option">
+          <input type="radio" name="videoSource" value="largest" />
+          <span><strong>Largest tile</strong><small>Whatever Meet makes largest</small></span>
+        </label>
+      </div>
+      <div class="hint sub" id="sourceHint">Meeting stage avoids your self-view when possible.</div>
+    </section>
 
     <div class="row">
       <label for="enabled">Pop out on tab switch</label>
@@ -149,20 +190,24 @@
     </div>
 
     <div class="row">
-      <label for="appSwitch">Also when leaving Firefox</label>
+      <label for="appSwitch">Keep floating when leaving Firefox</label>
       <input type="checkbox" id="appSwitch" />
     </div>
     <div class="hint sub">
-      Holds the meeting tab in the background with a placeholder tab, so it keeps
-      floating while you are in another app. Closes itself when you come back.
+      Optional. Firefox needs a temporary background tab to do this; it closes
+      when you return.
     </div>
 
     <div class="row">
-      <label for="showButton">Show "Pop out" button in Meet</label>
+      <label for="showButton">Show the “Pop out” button in Meet</label>
       <input type="checkbox" id="showButton" />
     </div>
+    <div class="hint sub">
+      On by default. The button appears in the meeting and opens the controls
+      window with a direct click.
+    </div>
 
-    <details open>
+    <details>
       <summary>Required setup</summary>
       <p>
         This drives Firefox's own auto Picture-in-Picture, which ships turned
@@ -171,22 +216,6 @@
       </p>
       <code>media.videocontrols.picture-in-picture.enable-when-switching-tabs.enabled</code>
       <p>It is also in Settings → General → Browsing.</p>
-    </details>
-
-    <details>
-      <summary>Two kinds of popout</summary>
-      <p>
-        <b>With controls</b> — the same API Chrome's Meet uses. A real window
-        with mic, camera and hang-up buttons. It needs a click to open (Firefox
-        has no way to open one automatically), then stays up through tab and app
-        switches.
-      </p>
-      <p>
-        <b>Automatic</b> — opens by itself on a tab or app switch, but is
-        video-only. Its mute button still toggles your microphone. Camera and
-        hang-up are keyboard shortcuts, under Add-ons → gear → Manage Extension
-        Shortcuts.
-      </p>
     </details>
 
     <details>

@@ -7,9 +7,15 @@ const enabled = document.getElementById("enabled");
 const appSwitch = document.getElementById("appSwitch");
 const controlsHint = document.getElementById("controlsHint");
 const showButton = document.getElementById("showButton");
-const popout = document.getElementById("popout");
-const popoutHint = document.getElementById("popoutHint");
-const videoSource = document.getElementById("videoSource");
+const videoSources = document.querySelectorAll("input[name='videoSource']");
+const sourceHint = document.getElementById("sourceHint");
+
+const SOURCE_HINTS = {
+  stage: "Meeting stage avoids your self-view when possible.",
+  screen: "Shared screen falls back to the meeting stage if no one is presenting.",
+  self: "Shows your mirrored self-view, even when it is not the active tile.",
+  largest: "Follows whichever visible tile Meet has made largest.",
+};
 
 function show(level, text, hint) {
   dot.className = "dot" + (level ? " " + level : "");
@@ -32,18 +38,22 @@ function showControls(controls) {
 }
 
 browser.storage.local
-  .get({ enabled: true, appSwitch: true, showButton: true, videoSource: "stage" })
+  .get({ enabled: true, appSwitch: false, showButton: true, videoSource: "stage" })
   .then((s) => {
     enabled.checked = s.enabled;
     appSwitch.checked = s.appSwitch;
     appSwitch.disabled = !s.enabled;
     showButton.checked = s.showButton;
-    videoSource.value = s.videoSource;
+    const selected = Array.from(videoSources).find((input) => input.value === s.videoSource);
+    (selected || videoSources[0]).checked = true;
+    sourceHint.textContent = SOURCE_HINTS[s.videoSource] || SOURCE_HINTS.stage;
   });
 
-videoSource.addEventListener("change", () => {
-  browser.storage.local.set({ videoSource: videoSource.value });
-});
+videoSources.forEach((input) => input.addEventListener("change", () => {
+  if (!input.checked) return;
+  browser.storage.local.set({ videoSource: input.value });
+  sourceHint.textContent = SOURCE_HINTS[input.value] || "";
+}));
 
 showButton.addEventListener("change", () => {
   browser.storage.local.set({ showButton: showButton.checked });
@@ -89,30 +99,6 @@ async function refresh() {
     return;
   }
   showControls(status.controls);
-
-  if (status.docPipSupported) {
-    popout.hidden = false;
-    popoutHint.hidden = false;
-    if (status.docPipOpen) {
-      popout.textContent = "Focus the floating window";
-    }
-    popout.onclick = async () => {
-      const result = await browser.tabs.sendMessage(tab.id, {
-        type: "meet-popout:open-docpip",
-      });
-      if (result?.already) {
-        window.close();
-      } else if (result?.armed) {
-        // requestWindow() needs a gesture in the page itself, which a click in
-        // this popup is not.
-        popoutHint.textContent = "Now click anywhere in the meeting.";
-        popout.disabled = true;
-      }
-    };
-    popoutHint.textContent = status.docPipOpen
-      ? "Floating window is open."
-      : "Opens a window with mic, camera and hang-up buttons.";
-  }
 
   if (status.shadowReady) {
     show("ok", "Ready", "Switch tabs and the meeting will pop out.");

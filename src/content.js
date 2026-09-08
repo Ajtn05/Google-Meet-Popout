@@ -39,6 +39,7 @@
   const POLL_MS = 1000;
   const MAX_MISSES = 3;
   const SHADOW_ATTR = "data-meet-popout-shadow";
+  const muteState = globalThis.MeetPopoutMuteState;
 
   const state = {
     enabled: true,
@@ -50,16 +51,25 @@
     lastFocused: null,
     borrowed: false,
     misses: 0,
-    micButton: null,
-    suppressVolumeChange: false,
+    controlsObserver: null,
+    controlsRefreshId: null,
+    // A programmatic mirror of Meet's state also emits volumechange. Remember
+    // it briefly so that we never interpret our own update as a PiP click.
+    expectedShadowMuted: null,
+    expectedShadowMutedTimer: null,
+    // A PiP click needs a moment for Meet to apply its state change. Do not
+    // mirror the old Meet state back into PiP during that short interval.
+    pendingMicTarget: null,
+    pendingMicTimer: null,
     pipWindow: null,
     pipVideo: null,
+    pipStatus: null,
     pipButtons: null,
     launchButton: null,
+    launchMessageTimer: null,
     armed: false,
     showButton: true,
     videoSource: "stage", // "stage" | "screen" | "self" | "largest"
-    micObserver: null,
     debug: false,
     patchedVideo: null, // real Meet <video> we temporarily made focusable
     targetKind: "none", // "shadow" | "fallback" | "none"
@@ -102,6 +112,15 @@
     );
   }
 
+  function isScreenTrack(track) {
+    const settings = track.getSettings?.() || {};
+    if (settings.displaySurface) return true;
+    // Remote display-capture tracks do not consistently retain
+    // displaySurface in Firefox. Labels are supplied by the sender and are a
+    // useful fallback without guessing based only on a video's aspect ratio.
+    return /\b(screen|window|display|monitor|tab)\b/i.test(track.label || "");
+  }
+
   /** The visible, playing, MediaStream-backed tiles that could go into PiP. */
   function availableVideos() {
     const candidates = [];
@@ -117,13 +136,11 @@
       if (r.top >= innerHeight || r.left >= innerWidth) continue;
 
       const track = liveVideoTrack(video);
-      const settings = track.getSettings?.() || {};
       candidates.push({
         video,
         area: r.width * r.height,
         self: isLikelySelfView(video),
-        // Screen-share tracks expose displaySurface in Firefox and Chromium.
-        screen: !!settings.displaySurface,
+        screen: isScreenTrack(track),
       });
     }
     return candidates;
@@ -176,9 +193,23 @@
    */
   const CONTROL_MATCHERS = {
     mic: [/microphone/i, /\bmic\b/i],
-    camera: [/camera/i],
+    camera: [/camera/i, /\bvideo\b/i],
     leave: [/leave call/i, /end call/i, /hang ?up/i],
   };
+  // These markers do not depend on English labels. Meet currently uses
+  // data-mute-button for the microphone; retain the camera variants for Meet
+  // deployments that expose them.
+  const CONTROL_MARKERS = {
+    mic: ["[data-mute-button]"],
+    camera: ["[data-camera-button]", "[data-video-button]"],
+  };
+  const CONTROL_SELECTOR = [
+    "[data-is-muted]",
+    "button[aria-label]",
+    "[role='button'][aria-label]",
+    "[data-tooltip]",
+  ].join(",");
+  const INTERACTIVE_SELECTOR = "button, [role='button'], input[type='button']";
 
   function labelOf(el) {
     return (
@@ -189,17 +220,63 @@
     );
   }
 
-  function findControl(kind) {
+  function controlContainer(el) {
+    if (el.matches?.(INTERACTIVE_SELECTOR)) return el;
+    return el.closest?.(INTERACTIVE_SELECTOR) || el;
+  }
+
+  /**
+   * data-is-muted lives on different descendants of the Meet button as its UI
+   * changes. Keep the labelled, clickable ancestor together with the element
+   * that owns the state attribute instead of assuming they are the same node.
+   */
+  function infoForControlNode(stateNode, matchers, markerMatched = false) {
+    const button = controlContainer(stateNode);
+    if (!button) return null;
+
+    // Meet sometimes labels a child (or the state-bearing node) rather than
+    // the button itself. Check both, plus labelled descendants.
+    const labels = [labelOf(stateNode), labelOf(button)];
+    for (const child of button.querySelectorAll?.("[aria-label], [data-tooltip], [title]") || []) {
+      labels.push(labelOf(child));
+    }
+    const labelMatched = labels.some(
+      (label) => label && matchers.some((matcher) => matcher.test(label))
+    );
+    if (!markerMatched && !labelMatched) return null;
+
+    const mutedNode = stateNode.hasAttribute("data-is-muted")
+      ? stateNode
+      : button.querySelector("[data-is-muted]");
+    return { button, stateNode: mutedNode || stateNode };
+  }
+
+  function controlInfo(kind) {
     const matchers = CONTROL_MATCHERS[kind];
     if (!matchers) return null;
-    const candidates = document.querySelectorAll(
-      "[data-is-muted], button[aria-label], [role='button'][aria-label], [data-tooltip]"
-    );
-    for (const el of candidates) {
-      const label = labelOf(el);
-      if (label && matchers.some((m) => m.test(label))) return el;
+
+    // Prefer the stable state-bearing controls. A generic labelled button may
+    // appear earlier in Meet's DOM and otherwise make us read its label while
+    // missing the real data-is-muted value on the actual toggle.
+    for (const selector of CONTROL_MARKERS[kind] || []) {
+      for (const node of document.querySelectorAll(selector)) {
+        const info = infoForControlNode(node, matchers, true);
+        if (info) return info;
+      }
+    }
+    for (const node of document.querySelectorAll("[data-is-muted]")) {
+      const info = infoForControlNode(node, matchers);
+      if (info) return info;
+    }
+    for (const node of document.querySelectorAll(CONTROL_SELECTOR)) {
+      const info = infoForControlNode(node, matchers);
+      if (info) return info;
     }
     return null;
+  }
+
+  function findControl(kind) {
+    return controlInfo(kind)?.button || null;
   }
 
   function activateControl(kind) {
@@ -210,62 +287,126 @@
     } catch {
       return false;
     }
-    // Meet updates its button attributes asynchronously.
-    setTimeout(mirrorMicToShadow, 120);
+    // Meet updates attributes asynchronously. Let the mutation observer do the
+    // normal reconciliation, but schedule one extra pass for implementations
+    // that update state without changing an observed attribute.
+    if (kind === "mic" || kind === "camera") setTimeout(refreshControls, 180);
     return true;
   }
 
   /** true = off/muted, false = live, null = could not tell. */
   function controlMuted(kind) {
-    const button = findControl(kind);
-    if (!button) return null;
-    const attr = button.getAttribute("data-is-muted");
-    if (attr === "true") return true;
-    if (attr === "false") return false;
-    const label = labelOf(button);
-    if (/turn on|unmute/i.test(label)) return true;
-    if (/turn off|^mute/i.test(label)) return false;
+    const info = controlInfo(kind);
+    if (!info) return null;
+
+    const nodes = [info.stateNode, info.button];
+    for (const node of nodes) {
+      const attr = node?.getAttribute?.("data-is-muted");
+      if (attr === "true") return true;
+      if (attr === "false") return false;
+    }
+    for (const node of nodes) {
+      const label = labelOf(node);
+      if (/turn on|unmute/i.test(label)) return true;
+      if (/turn off|^mute/i.test(label)) return false;
+    }
     return null;
   }
 
   const micMuted = () => controlMuted("mic");
 
+  function setShadowMuted(muted) {
+    const shadow = state.shadowVideo;
+    if (!shadow || shadow.muted === muted) return;
+
+    state.expectedShadowMuted = muted;
+    clearTimeout(state.expectedShadowMutedTimer);
+    shadow.muted = muted;
+    // Firefox normally delivers volumechange immediately. The timeout covers
+    // a failed/no-event update without swallowing a later real PiP click.
+    state.expectedShadowMutedTimer = setTimeout(() => {
+      if (state.expectedShadowMuted === muted) state.expectedShadowMuted = null;
+    }, 150);
+  }
+
   /** Push Meet's mic state onto the shadow element so the PiP icon agrees. */
   function mirrorMicToShadow() {
     if (!shadowIsReady()) return;
     const muted = micMuted();
-    if (muted === null) return;
-    const shadow = state.shadowVideo;
-    if (shadow.muted === muted) return;
-    state.suppressVolumeChange = true;
-    shadow.muted = muted;
-    setTimeout(() => {
-      state.suppressVolumeChange = false;
-    }, 0);
+    const decision = muteState.fromMeetState({
+      shadowMuted: state.shadowVideo.muted,
+      meetMuted: muted,
+      pendingTarget: state.pendingMicTarget,
+    });
+    if (decision.clearPending) {
+      state.pendingMicTarget = null;
+      clearTimeout(state.pendingMicTimer);
+    }
+    if (decision.action === "wait" || decision.action === "none") return;
+    setShadowMuted(decision.muted);
   }
 
   /** Someone pressed mute in the PiP window. */
   function onShadowVolumeChange() {
-    if (state.suppressVolumeChange) return;
-    const muted = micMuted();
-    if (muted === null) return;
-    if (state.shadowVideo && state.shadowVideo.muted !== muted) {
-      activateControl("mic");
+    const shadow = state.shadowVideo;
+    if (!shadow) return;
+    const decision = muteState.fromShadowVolumeChange({
+      shadowMuted: shadow.muted,
+      expectedShadowMuted: state.expectedShadowMuted,
+      pendingTarget: state.pendingMicTarget,
+      meetMuted: micMuted(),
+    });
+    if (decision.clearExpected) {
+      state.expectedShadowMuted = null;
+      clearTimeout(state.expectedShadowMutedTimer);
     }
+    if (decision.action !== "toggle-meet") return;
+
+    const target = decision.target;
+    if (!activateControl("mic")) {
+      mirrorMicToShadow();
+      return;
+    }
+    state.pendingMicTarget = target;
+    clearTimeout(state.pendingMicTimer);
+    state.pendingMicTimer = setTimeout(() => {
+      if (state.pendingMicTarget !== target) return;
+      state.pendingMicTarget = null;
+      // If Meet rejected the click, put the PiP icon back to the real state.
+      mirrorMicToShadow();
+    }, 800);
   }
 
   /**
-   * Watch the mic button directly rather than polling, so the PiP icon still
-   * tracks the real state while the tab is hidden and polling is stopped.
+   * Watch Meet's whole control area rather than one button node. Meet replaces
+   * its controls during layout changes, and polling deliberately stops while a
+   * video PiP window is open. A document observer keeps mute state linked in
+   * both of those cases.
    */
-  function watchMicButton() {
-    const button = findControl("mic");
-    if (!button || button === state.micButton) return;
-    state.micObserver?.disconnect();
-    state.micButton = button;
-    state.micObserver = new MutationObserver(() => mirrorMicToShadow());
-    state.micObserver.observe(button, { attributes: true });
+  function refreshControls() {
+    state.controlsRefreshId = null;
     mirrorMicToShadow();
+    refreshPipButtons();
+    // If Meet replaced part of its page shell, put the launcher back straight
+    // away instead of waiting for the next polling tick.
+    updateLaunchButton();
+  }
+
+  function watchControls() {
+    if (state.controlsObserver) return;
+    const root = document.documentElement;
+    if (!root) return;
+    state.controlsObserver = new MutationObserver(() => {
+      if (state.controlsRefreshId !== null) return;
+      state.controlsRefreshId = setTimeout(refreshControls, 0);
+    });
+    state.controlsObserver.observe(root, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["aria-label", "aria-pressed", "data-is-muted", "data-tooltip", "title"],
+    });
+    refreshControls();
   }
 
   /* --------------------------------------------------------------- doc pip */
@@ -289,7 +430,10 @@
    * CSSOM rather than <style> elements, which a strict style-src would reject.
    */
 
-  const DOCPIP_SUPPORTED = typeof window.documentPictureInPicture !== "undefined";
+  // Firefox rejects requestWindow() from an iframe. Content scripts also run
+  // in Meet's frames, so only the page-level script may offer this button.
+  const DOCPIP_SUPPORTED =
+    window.top === window && typeof window.documentPictureInPicture !== "undefined";
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   const ICON_PATHS = {
@@ -324,6 +468,20 @@
   }
 
   const docPipOpen = () => !!(state.pipWindow && !state.pipWindow.closed);
+
+  function showLaunchMessage(message) {
+    const button = state.launchButton;
+    if (!button?.isConnected) return;
+    clearTimeout(state.launchMessageTimer);
+    button.textContent = message;
+    button.setAttribute("aria-label", message);
+    button.title = message;
+    state.launchMessageTimer = setTimeout(() => {
+      if (!button.isConnected) return;
+      button.textContent = "Pop out";
+      setLaunchButtonAvailability(button);
+    }, 3500);
+  }
 
   function makeButton(doc, { iconKey, label, danger, onClick }) {
     const button = doc.createElement("button");
@@ -366,8 +524,26 @@
       const button = buttons[kind];
       if (!button) continue;
       const off = controlMuted(kind);
+      const name = kind === "mic" ? "Microphone" : "Camera";
+      if (off === null) {
+        // A neutral state is safer than presenting an "on" icon that we
+        // cannot verify against Meet's real control.
+        button.dataset.active = "";
+        button.setAttribute("aria-label", `${name} state unavailable`);
+        button.title = `${name} state unavailable`;
+        css(button, { background: "rgba(255,255,255,0.28)" });
+        button.replaceChildren(
+          makeIcon(state.pipWindow.document, kind === "mic" ? "micOn" : "camOn")
+        );
+        continue;
+      }
       const isOff = off === true;
       button.dataset.active = isOff ? "1" : "";
+      button.setAttribute(
+        "aria-label",
+        isOff ? `${name} is off. Activate to turn it on.` : `${name} is on. Activate to turn it off.`
+      );
+      button.title = button.getAttribute("aria-label");
       css(button, {
         background: isOff ? "#d93025" : "rgba(255,255,255,0.16)",
       });
@@ -381,6 +557,13 @@
             : "camOn";
       button.replaceChildren(makeIcon(state.pipWindow.document, iconKey));
     }
+  }
+
+  function setPipStatus(message) {
+    const status = state.pipStatus;
+    if (!status) return;
+    status.textContent = message || "";
+    css(status, { display: message ? "grid" : "none" });
   }
 
   function buildPipUI(pipWindow, track) {
@@ -407,10 +590,29 @@
       display: "block",
       background: "#000",
     });
-    video.srcObject = new MediaStream([track]);
+    if (track) video.srcObject = new MediaStream([track]);
     doc.body.appendChild(video);
-    video.play().catch(() => {});
+    if (track) video.play().catch(() => {});
     state.pipVideo = video;
+
+    const status = doc.createElement("div");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    css(status, {
+      position: "absolute",
+      inset: "0",
+      display: "grid",
+      "place-items": "center",
+      padding: "24px",
+      "box-sizing": "border-box",
+      color: "rgba(255,255,255,0.82)",
+      "font-size": "14px",
+      "text-align": "center",
+      "pointer-events": "none",
+    });
+    doc.body.appendChild(status);
+    state.pipStatus = status;
+    setPipStatus(track ? "" : "Waiting for a visible Meet video…");
 
     const bar = doc.createElement("div");
     css(bar, {
@@ -472,7 +674,10 @@
    * without transient activation, and there is no way around that in Firefox.
    */
   async function openDocPiP() {
-    if (!DOCPIP_SUPPORTED) return false;
+    if (!DOCPIP_SUPPORTED) {
+      showLaunchMessage("Controls popout is unavailable in this Firefox");
+      return false;
+    }
     if (docPipOpen()) {
       state.pipWindow.focus();
       return true;
@@ -480,7 +685,6 @@
 
     const source = pickBestVideo();
     const track = source && liveVideoTrack(source);
-    if (!track) return false;
 
     let pipWindow;
     try {
@@ -490,11 +694,16 @@
       });
     } catch (e) {
       log("requestWindow rejected", e);
+      showLaunchMessage(
+        e?.name === "NotAllowedError"
+          ? "Firefox blocked the popout — click again in the meeting"
+          : "Could not open the controls popout"
+      );
       return false;
     }
 
     state.pipWindow = pipWindow;
-    state.videoTrack = track;
+    state.videoTrack = track || null;
     try {
       buildPipUI(pipWindow, track);
     } catch (e) {
@@ -504,6 +713,7 @@
     pipWindow.addEventListener("pagehide", () => {
       state.pipWindow = null;
       state.pipVideo = null;
+      state.pipStatus = null;
       state.pipButtons = null;
       updateLaunchButton();
       if (document.visibilityState === "visible") startPolling();
@@ -530,16 +740,39 @@
   function updatePipVideo(track) {
     if (!docPipOpen() || !state.pipVideo) return;
     const current = state.pipVideo.srcObject;
+    if (!track) {
+      if (current) state.pipVideo.srcObject = null;
+      state.videoTrack = null;
+      setPipStatus("Waiting for a visible Meet video…");
+      return;
+    }
     if (current && current.getVideoTracks()[0] === track) return;
     try {
       state.pipVideo.srcObject = new MediaStream([track]);
       state.pipVideo.play().catch(() => {});
+      state.videoTrack = track;
+      setPipStatus("");
     } catch (e) {
       log("could not swap the popout track", e);
     }
   }
 
   /* --------------------------------------------------------- launch button */
+
+  function setLaunchButtonAvailability(button) {
+    // Source discovery can briefly be empty while Meet redraws ordinary
+    // controls. Do not turn the entry point into a permanent-looking loading
+    // button: the user click runs a fresh discovery pass in openDocPiP().
+    button.disabled = false;
+    const label = "Pop out this meeting into a floating window";
+    const title = "Pop out this meeting";
+    if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
+    if (button.title !== title) button.title = title;
+    css(button, {
+      opacity: "1",
+      cursor: "pointer",
+    });
+  }
 
   function updateLaunchButton() {
     if (!DOCPIP_SUPPORTED || !state.showButton) {
@@ -548,13 +781,18 @@
       return;
     }
 
-    const wanted = !!pickBestVideo() && !docPipOpen();
-    if (!wanted) {
+    // Meet regularly removes and recreates its video tree while an ordinary
+    // control is clicked. Keep the launcher in place through that brief gap;
+    // a disabled button is much less confusing than a vanishing one.
+    if (docPipOpen()) {
       state.launchButton?.remove();
       state.launchButton = null;
       return;
     }
-    if (state.launchButton?.isConnected) return;
+    if (state.launchButton?.isConnected) {
+      setLaunchButtonAvailability(state.launchButton);
+      return;
+    }
 
     const button = document.createElement("button");
     button.type = "button";
@@ -571,7 +809,6 @@
       background: "#1a73e8",
       color: "#fff",
       font: "500 13px/1 system-ui, -apple-system, sans-serif",
-      cursor: "pointer",
       "box-shadow": "0 2px 10px rgba(0,0,0,0.35)",
     });
     // The click is the transient activation requestWindow() needs.
@@ -582,6 +819,7 @@
     });
     (document.body || document.documentElement).appendChild(button);
     state.launchButton = button;
+    setLaunchButtonAvailability(button);
   }
 
   // Fallback entry point: the toolbar popup arms this, and the next click
@@ -642,7 +880,9 @@
     const video = document.createElement("video");
     video.setAttribute(SHADOW_ATTR, "");
     video.setAttribute("aria-hidden", "true");
-    video.muted = true;
+    // Start in the real microphone state. Starting every new shadow muted was
+    // visible as a wrong PiP icon until the next polling pass.
+    video.muted = muteState.initialShadowMuted(micMuted());
     video.autoplay = true;
     video.playsInline = true;
     // Needed for focus() to take: -1 keeps it out of the tab order.
@@ -667,9 +907,10 @@
     ].join(";");
 
     video.addEventListener("volumechange", onShadowVolumeChange);
+    video.addEventListener("loadeddata", mirrorMicToShadow, { once: true });
     video.srcObject = stream;
     (document.body || document.documentElement).appendChild(video);
-    video.play().catch((e) => log("shadow play rejected", e));
+    video.play().then(mirrorMicToShadow).catch((e) => log("shadow play rejected", e));
 
     state.shadowVideo = video;
     state.shadowStream = stream;
@@ -699,6 +940,10 @@
   }
 
   function destroyShadow() {
+    clearTimeout(state.expectedShadowMutedTimer);
+    clearTimeout(state.pendingMicTimer);
+    state.expectedShadowMuted = null;
+    state.pendingMicTarget = null;
     if (state.shadowVideo) {
       try {
         state.shadowVideo.srcObject = null;
@@ -733,6 +978,13 @@
     const track = source && liveVideoTrack(source);
 
     if (!track) {
+      if (docPipOpen()) {
+        watchControls();
+        updatePipVideo(null);
+        refreshPipButtons();
+        state.targetKind = "docpip";
+        return;
+      }
       // Meet reshuffles tiles constantly, so one empty poll usually means a
       // layout change rather than the end of the meeting. Tearing the shadow
       // element down on every blip would keep resetting its readyState.
@@ -741,7 +993,7 @@
       return;
     }
     state.misses = 0;
-    watchMicButton();
+    watchControls();
     updateLaunchButton();
 
     // The popout window supersedes the chrome-side one: it is already floating
@@ -903,11 +1155,13 @@
 
   window.addEventListener("pagehide", () => {
     stopPolling();
-    state.micObserver?.disconnect();
-    state.micObserver = null;
-    state.micButton = null;
+    state.controlsObserver?.disconnect();
+    state.controlsObserver = null;
+    clearTimeout(state.controlsRefreshId);
+    state.controlsRefreshId = null;
     state.launchButton?.remove();
     state.launchButton = null;
+    clearTimeout(state.launchMessageTimer);
     closeDocPiP();
     destroyShadow();
     try {

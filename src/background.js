@@ -48,7 +48,9 @@ async function park() {
 
   const settings = await browser.storage.local.get({
     enabled: true,
-    appSwitch: true,
+    // Creating a placeholder tab is intentionally opt-in: automatic PiP when
+    // switching tabs remains the normal, uncluttered behaviour.
+    appSwitch: false,
   });
   if (!settings.enabled || !settings.appSwitch) return;
 
