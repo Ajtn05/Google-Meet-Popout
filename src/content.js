@@ -38,8 +38,10 @@
   const MIN_DIM = 144;
   const POLL_MS = 1000;
   const MAX_MISSES = 3;
+  const HIDDEN_MAX_MISSES = 10;
   const SHADOW_ATTR = "data-meet-popout-shadow";
   const muteState = globalThis.MeetPopoutMuteState;
+  const participantTiles = globalThis.MeetPopoutParticipantTiles;
 
   const state = {
     enabled: true,
@@ -62,7 +64,16 @@
     pendingMicTarget: null,
     pendingMicTimer: null,
     pipWindow: null,
+    pipOpening: false,
+    pipFallback: false,
+    pipError: null,
+    pipExpectedClose: false,
     pipVideo: null,
+    pipGallery: null,
+    pipTiles: new Map(),
+    pipGalleryMisses: 0,
+    pipOverflow: null,
+    pipView: "gallery",
     pipStatus: null,
     pipButtons: null,
     launchButton: null,
@@ -437,6 +448,8 @@
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   const ICON_PATHS = {
+    gallery:
+      "M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z",
     micOn:
       "M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z",
     micOff:
@@ -529,6 +542,7 @@
         // A neutral state is safer than presenting an "on" icon that we
         // cannot verify against Meet's real control.
         button.dataset.active = "";
+        button.disabled = true;
         button.setAttribute("aria-label", `${name} state unavailable`);
         button.title = `${name} state unavailable`;
         css(button, { background: "rgba(255,255,255,0.28)" });
@@ -538,6 +552,7 @@
         continue;
       }
       const isOff = off === true;
+      button.disabled = false;
       button.dataset.active = isOff ? "1" : "";
       button.setAttribute(
         "aria-label",
@@ -564,6 +579,153 @@
     if (!status) return;
     status.textContent = message || "";
     css(status, { display: message ? "grid" : "none" });
+  }
+
+  function renderPipView() {
+    if (!docPipOpen() || !state.pipVideo || !state.pipGallery) return;
+    const hasPeople = state.pipTiles.size > 0;
+    const galleryVisible = state.pipView === "gallery" && hasPeople;
+    css(state.pipGallery, { display: galleryVisible ? "grid" : "none" });
+    css(state.pipVideo, { display: galleryVisible ? "none" : "block" });
+    if (galleryVisible) {
+      for (const tile of state.pipTiles.values()) {
+        if (tile.media.tagName === "VIDEO" && tile.media.paused) {
+          tile.media.play().catch(() => {});
+        }
+      }
+    } else if (state.pipVideo.srcObject && state.pipVideo.paused) {
+      state.pipVideo.play().catch(() => {});
+    }
+    setPipStatus(galleryVisible || state.pipVideo.srcObject
+      ? ""
+      : "Waiting for a visible Meet video or participant…");
+    const button = state.pipButtons?.gallery;
+    if (button) {
+      const label = galleryVisible ? "Show meeting stage" : "Show participants";
+      button.setAttribute("aria-label", label);
+      button.title = label;
+      button.setAttribute("aria-pressed", String(galleryVisible));
+      css(button, { background: galleryVisible ? "#1a73e8" : "rgba(255,255,255,0.16)" });
+    }
+  }
+
+  function makeGalleryTile(doc, entry) {
+    const frame = doc.createElement("div");
+    frame.setAttribute("aria-label", entry.name);
+    css(frame, {
+      position: "relative", overflow: "hidden", "min-width": "0", "min-height": "0",
+      "border-radius": "8px", background: "#202124", display: "grid", "place-items": "center",
+    });
+    let media;
+    if (entry.track) {
+      media = doc.createElement("video");
+      media.autoplay = true;
+      media.playsInline = true;
+      media.muted = true;
+      media.srcObject = new MediaStream([entry.track]);
+      css(media, { width: "100%", height: "100%", "object-fit": "cover" });
+      frame.appendChild(media);
+    } else {
+      media = doc.createElement("div");
+      media.textContent = entry.name.slice(0, 1).toUpperCase();
+      css(media, {
+        width: "72px", height: "72px", "border-radius": "50%", background: "#5f6368",
+        color: "white", display: "grid", "place-items": "center", "font-size": "34px",
+        "font-weight": "500", overflow: "hidden", position: "relative",
+      });
+      if (entry.photo) {
+        const photo = doc.createElement("img");
+        photo.alt = "";
+        photo.src = entry.photo;
+        css(photo, {
+          position: "absolute", width: "100%", height: "100%", "object-fit": "cover",
+        });
+        photo.addEventListener("error", () => photo.remove(), { once: true });
+        media.appendChild(photo);
+      }
+      frame.appendChild(media);
+    }
+    const label = doc.createElement("div");
+    label.textContent = entry.name;
+    css(label, {
+      position: "absolute", left: "0", right: "0", bottom: "0", color: "#fff",
+      padding: "14px 8px 6px", "font-size": "11px", "white-space": "nowrap",
+      overflow: "hidden", "text-overflow": "ellipsis",
+      background: "linear-gradient(transparent, rgba(0,0,0,0.72))",
+    });
+    frame.appendChild(label);
+    return { frame, media, track: entry.track, photo: entry.photo, name: entry.name };
+  }
+
+  function updatePipGallery() {
+    try {
+      updatePipGalleryFromMeet();
+    } catch (error) {
+      // Meet can replace a tile while we are reading it. A discovery failure
+      // must never tear down the entire floating window.
+      console.warn("[meet-popout] participant gallery unavailable", error);
+      state.pipView = "stage";
+      renderPipView();
+    }
+  }
+
+  function updatePipGalleryFromMeet() {
+    if (!docPipOpen() || !state.pipGallery) return;
+    const found = participantTiles.collect(document, {
+      liveTrack: liveVideoTrack,
+      isSelf: isLikelySelfView,
+      isScreen: isScreenTrack,
+      shadowAttribute: SHADOW_ATTR,
+    });
+    if (!found.length && document.visibilityState === "hidden" &&
+        state.pipTiles.size && ++state.pipGalleryMisses < 3) return;
+    if (found.length) state.pipGalleryMisses = 0;
+    const selected = participantTiles.select(found, pickBestVideo());
+    const next = new Map();
+    const frames = [];
+    for (const entry of selected) {
+      const previous = state.pipTiles.get(entry.id);
+      let tile;
+      try {
+        tile = previous && previous.track === entry.track &&
+          previous.photo === entry.photo && previous.name === entry.name
+          ? previous
+          : makeGalleryTile(state.pipWindow.document, entry);
+      } catch (error) {
+        log("could not add participant tile", entry.name, error);
+        continue;
+      }
+      if (previous && previous !== tile && previous.media.tagName === "VIDEO") {
+        previous.media.srcObject = null;
+      }
+      next.set(entry.id, tile);
+      frames.push(tile.frame);
+    }
+    for (const [id, tile] of state.pipTiles) {
+      if (!next.has(id) && tile.media.tagName === "VIDEO") tile.media.srcObject = null;
+    }
+    state.pipTiles = next;
+    const gallery = state.pipGallery;
+    if (frames.length !== gallery.children.length ||
+        frames.some((frame, index) => gallery.children[index] !== frame)) {
+      gallery.replaceChildren(...frames);
+    }
+    for (const tile of next.values()) {
+      if (tile.media.tagName === "VIDEO" && tile.media.paused) {
+        tile.media.play().catch(() => {});
+      }
+    }
+    css(gallery, {
+      "grid-template-columns": frames.length === 1 ? "1fr" : "repeat(2, minmax(0, 1fr))",
+      "grid-template-rows": frames.length <= 2 ? "1fr" : "repeat(2, minmax(0, 1fr))",
+    });
+    if (state.pipOverflow) {
+      state.pipOverflow.textContent = found.length > selected.length
+        ? `+${found.length - selected.length} more`
+        : "";
+      css(state.pipOverflow, { display: found.length > selected.length ? "block" : "none" });
+    }
+    renderPipView();
   }
 
   function buildPipUI(pipWindow, track) {
@@ -595,6 +757,24 @@
     if (track) video.play().catch(() => {});
     state.pipVideo = video;
 
+    const gallery = doc.createElement("div");
+    gallery.setAttribute("aria-label", "Meeting participants");
+    css(gallery, {
+      position: "absolute", inset: "0", gap: "4px", padding: "5px",
+      "box-sizing": "border-box", display: "none", background: "#111",
+    });
+    doc.body.appendChild(gallery);
+    state.pipGallery = gallery;
+
+    const overflow = doc.createElement("div");
+    css(overflow, {
+      position: "absolute", top: "9px", right: "9px", padding: "3px 7px",
+      "border-radius": "10px", background: "rgba(0,0,0,0.72)", color: "#fff",
+      "font-size": "11px", display: "none", "pointer-events": "none",
+    });
+    doc.body.appendChild(overflow);
+    state.pipOverflow = overflow;
+
     const status = doc.createElement("div");
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
@@ -612,7 +792,7 @@
     });
     doc.body.appendChild(status);
     state.pipStatus = status;
-    setPipStatus(track ? "" : "Waiting for a visible Meet video…");
+    setPipStatus(track ? "" : "Waiting for a visible Meet video or participant…");
 
     const bar = doc.createElement("div");
     css(bar, {
@@ -633,11 +813,24 @@
     const reveal = (shown) => css(bar, { opacity: shown ? "1" : "0" });
     doc.body.addEventListener("mouseenter", () => reveal(true));
     doc.body.addEventListener("mouseleave", () => reveal(false));
+    doc.body.addEventListener("pointerdown", () => {
+      reveal(true);
+      pipWindow.setTimeout(() => reveal(false), 2500);
+    });
+    bar.addEventListener("focusin", () => reveal(true));
     // Touch and small windows never get a hover, so show it briefly on open.
     reveal(true);
     pipWindow.setTimeout(() => reveal(false), 2500);
 
     const buttons = {
+      gallery: makeButton(doc, {
+        iconKey: "gallery",
+        label: "Show meeting stage",
+        onClick: () => {
+          state.pipView = state.pipView === "gallery" ? "stage" : "gallery";
+          renderPipView();
+        },
+      }),
       mic: makeButton(doc, {
         iconKey: "micOn",
         label: "Toggle microphone",
@@ -659,14 +852,50 @@
         label: "Leave the call",
         danger: true,
         onClick: () => {
-          activateControl("leave");
-          closeDocPiP();
+          if (activateControl("leave")) closeDocPiP();
         },
       }),
     };
     state.pipButtons = buttons;
-    bar.append(buttons.mic, buttons.camera, buttons.leave);
-    refreshPipButtons();
+    bar.append(buttons.gallery, buttons.mic, buttons.camera, buttons.leave);
+    renderPipView();
+  }
+
+  function buildFallbackPipUI(pipWindow, track) {
+    const doc = pipWindow.document;
+    for (const tile of state.pipTiles.values()) {
+      if (tile.media.tagName === "VIDEO") tile.media.srcObject = null;
+    }
+    state.pipTiles.clear();
+    doc.body.replaceChildren();
+    css(doc.body, { margin: "0", background: "#202124", height: "100%" });
+    state.pipGallery = null;
+    state.pipStatus = null;
+    state.pipButtons = null;
+    state.pipOverflow = null;
+    let video = null;
+    if (track) {
+      try {
+        video = doc.createElement("video");
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        video.srcObject = new MediaStream([track]);
+        css(video, { width: "100%", height: "100%", "object-fit": "contain" });
+        doc.body.appendChild(video);
+        video.play().catch(() => {});
+      } catch (error) {
+        console.error("[meet-popout] could not attach fallback video", error);
+        video = null;
+      }
+    }
+    state.pipVideo = video;
+    if (!video) {
+      const message = doc.createElement("div");
+      message.textContent = "Waiting for a Meet video";
+      css(message, { color: "#fff", padding: "24px", "font-family": "system-ui" });
+      doc.body.appendChild(message);
+    }
   }
 
   /**
@@ -674,6 +903,7 @@
    * without transient activation, and there is no way around that in Firefox.
    */
   async function openDocPiP() {
+    if (!state.enabled || state.pipOpening) return false;
     if (!DOCPIP_SUPPORTED) {
       showLaunchMessage("Controls popout is unavailable in this Firefox");
       return false;
@@ -687,6 +917,7 @@
     const track = source && liveVideoTrack(source);
 
     let pipWindow;
+    state.pipOpening = true;
     try {
       pipWindow = await window.documentPictureInPicture.requestWindow({
         width: 420,
@@ -694,29 +925,64 @@
       });
     } catch (e) {
       log("requestWindow rejected", e);
+      state.pipError = e?.message || "Firefox rejected the popout request";
       showLaunchMessage(
         e?.name === "NotAllowedError"
           ? "Firefox blocked the popout — click again in the meeting"
           : "Could not open the controls popout"
       );
+      state.pipOpening = false;
       return false;
     }
 
+    state.pipOpening = false;
+    if (!state.enabled) {
+      pipWindow.close();
+      return false;
+    }
     state.pipWindow = pipWindow;
-    state.videoTrack = track || null;
+    state.pipFallback = false;
+    state.pipError = null;
+    state.pipExpectedClose = false;
+    state.pipView = "gallery";
+    const openedAt = Date.now();
     try {
       buildPipUI(pipWindow, track);
     } catch (e) {
-      log("could not build the popout UI", e);
+      console.error("[meet-popout] could not build controls; showing video only", e);
+      state.pipFallback = true;
+      state.pipError = e?.message || "Controls could not be built";
+      try {
+        buildFallbackPipUI(pipWindow, track);
+      } catch (fallbackError) {
+        console.error("[meet-popout] could not build fallback popout", fallbackError);
+        state.pipError = fallbackError?.message || "Popout document could not be built";
+        // Keep the browser window available for diagnostics. A rendering
+        // failure in an extension content script is not a reason to dismiss
+        // Firefox's already opened PiP window.
+      }
     }
 
     pipWindow.addEventListener("pagehide", () => {
+      if (state.pipWindow !== pipWindow) return;
+      if (!state.pipExpectedClose && !state.pipError && Date.now() - openedAt < 3000) {
+        state.pipError = "Firefox closed the floating window immediately";
+      }
       state.pipWindow = null;
+      state.pipFallback = false;
+      state.pipExpectedClose = false;
+      for (const tile of state.pipTiles.values()) {
+        if (tile.media.tagName === "VIDEO") tile.media.srcObject = null;
+      }
+      state.pipTiles.clear();
+      state.pipGalleryMisses = 0;
       state.pipVideo = null;
+      state.pipGallery = null;
+      state.pipOverflow = null;
       state.pipStatus = null;
       state.pipButtons = null;
       updateLaunchButton();
-      if (document.visibilityState === "visible") startPolling();
+      if (state.enabled && document.visibilityState === "visible") startPolling();
     });
 
     // The chrome-side popout would be a second floating window; stand it down.
@@ -731,6 +997,7 @@
   function closeDocPiP() {
     if (docPipOpen()) {
       try {
+        state.pipExpectedClose = true;
         state.pipWindow.close();
       } catch {}
     }
@@ -738,20 +1005,28 @@
 
   /** Follow the active speaker without rebuilding the window. */
   function updatePipVideo(track) {
-    if (!docPipOpen() || !state.pipVideo) return;
+    if (!docPipOpen()) return;
+    if (!state.pipVideo) {
+      if (state.pipFallback && track) {
+        try {
+          buildFallbackPipUI(state.pipWindow, track);
+        } catch (error) {
+          log("could not attach a newly available fallback video", error);
+        }
+      }
+      return;
+    }
     const current = state.pipVideo.srcObject;
     if (!track) {
       if (current) state.pipVideo.srcObject = null;
-      state.videoTrack = null;
-      setPipStatus("Waiting for a visible Meet video…");
+      renderPipView();
       return;
     }
     if (current && current.getVideoTracks()[0] === track) return;
     try {
       state.pipVideo.srcObject = new MediaStream([track]);
       state.pipVideo.play().catch(() => {});
-      state.videoTrack = track;
-      setPipStatus("");
+      renderPipView();
     } catch (e) {
       log("could not swap the popout track", e);
     }
@@ -775,7 +1050,7 @@
   }
 
   function updateLaunchButton() {
-    if (!DOCPIP_SUPPORTED || !state.showButton) {
+    if (!DOCPIP_SUPPORTED || !state.showButton || !state.enabled || !findControl("leave")) {
       state.launchButton?.remove();
       state.launchButton = null;
       return;
@@ -980,15 +1255,28 @@
     if (!track) {
       if (docPipOpen()) {
         watchControls();
-        updatePipVideo(null);
+        // Meet replaces tiles during layout changes. Retain the last live
+        // track briefly instead of flashing a black waiting screen.
+        const currentTrack = state.pipVideo?.srcObject?.getVideoTracks?.()[0];
+        if (++state.misses >= MAX_MISSES || currentTrack?.readyState !== "live") {
+          updatePipVideo(null);
+        }
+        updatePipGallery();
         refreshPipButtons();
         state.targetKind = "docpip";
+        return;
+      }
+      // A background tab can stop laying out its tiles while the MediaStream
+      // stays live. Keep that stream in Firefox's PiP until it ends.
+      if (document.visibilityState === "hidden" &&
+          state.shadowVideo && state.videoTrack?.readyState === "live") {
         return;
       }
       // Meet reshuffles tiles constantly, so one empty poll usually means a
       // layout change rather than the end of the meeting. Tearing the shadow
       // element down on every blip would keep resetting its readyState.
-      if (++state.misses >= MAX_MISSES) destroyShadow();
+      const maxMisses = document.visibilityState === "hidden" ? HIDDEN_MAX_MISSES : MAX_MISSES;
+      if (++state.misses >= maxMisses) destroyShadow();
       updateLaunchButton();
       return;
     }
@@ -1001,6 +1289,7 @@
     if (docPipOpen()) {
       destroyShadow();
       updatePipVideo(track);
+      updatePipGallery();
       refreshPipButtons();
       state.targetKind = "docpip";
       return;
@@ -1017,13 +1306,6 @@
   }
 
   /* ------------------------------------------------------------- focusing  */
-
-  function isEditable(el) {
-    if (!el) return false;
-    if (el.isContentEditable) return true;
-    const tag = el.tagName;
-    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-  }
 
   /**
    * Fallback for the case where the shadow element never became playable.
@@ -1103,28 +1385,29 @@
 
   function onVisibilityChange() {
     if (document.visibilityState === "hidden") {
-      // The popout follows the active speaker, so it needs the poll to keep
-      // running while the tab is in the background.
-      if (!docPipOpen()) stopPolling();
+      if (!state.enabled) return;
+      // Keep the source current while Firefox displays the shadow in PiP.
+      // Stopping here froze the tile selected at the moment of the tab switch.
+      sync();
+      startPolling();
       borrowFocus();
     } else {
       // Firefox closes the PiP window itself on VideoTabShown; we only have to
       // give back the focus we borrowed.
       releaseFocus();
-      startPolling();
+      if (state.enabled) startPolling();
     }
   }
 
   /**
    * Belt and braces. A tab switch blurs the window a moment before the document
    * reports itself hidden, and focus() is unambiguously honoured while the
-   * document is still the active one. Skipped while typing, so this never
-   * interrupts the chat box; the visibilitychange path still covers that case.
+   * document is still the active one. The old focus is restored on return,
+   * including when the user was typing in Meet chat.
    */
   function onWindowBlur() {
     if (!state.enabled) return;
     if (document.visibilityState !== "visible") return;
-    if (isEditable(document.activeElement)) return;
     if (!shadowIsReady()) return;
     borrowFocus();
   }
@@ -1162,7 +1445,9 @@
     state.launchButton?.remove();
     state.launchButton = null;
     clearTimeout(state.launchMessageTimer);
-    closeDocPiP();
+    // Firefox owns the Document PiP window's lifetime and closes it if this
+    // page truly navigates away. Closing it ourselves here can race a transient
+    // pagehide during Meet's own page transitions.
     destroyShadow();
     try {
       state.audio?.ctx.close();
@@ -1177,7 +1462,7 @@
       state.debug = settings.debug;
       state.showButton = settings.showButton;
       state.videoSource = settings.videoSource;
-      if (document.visibilityState === "visible") startPolling();
+      if (state.enabled && document.visibilityState === "visible") startPolling();
     })
     .catch(() => startPolling());
 
@@ -1186,10 +1471,19 @@
     if (changes.enabled) {
       state.enabled = changes.enabled.newValue;
       if (!state.enabled) {
+        state.armed = false;
+        closeDocPiP();
+        stopPolling();
+        state.controlsObserver?.disconnect();
+        state.controlsObserver = null;
+        clearTimeout(state.controlsRefreshId);
+        state.controlsRefreshId = null;
         releaseFocus();
         destroyShadow();
+        state.launchButton?.remove();
+        state.launchButton = null;
       } else {
-        sync();
+        startPolling();
       }
     }
     if (changes.debug) state.debug = changes.debug.newValue;
@@ -1232,6 +1526,8 @@
         targetKind: state.targetKind,
         docPipSupported: DOCPIP_SUPPORTED,
         docPipOpen: docPipOpen(),
+        pipFallback: state.pipFallback,
+        pipError: state.pipError,
         armed: state.armed,
         videoSource: state.videoSource,
         controls: {

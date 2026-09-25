@@ -30,6 +30,7 @@ const BLUR_GRACE_MS = 400;
 const session = browser.storage.session ?? browser.storage.local;
 
 let blurTimer = null;
+let parking = null;
 
 const getParked = async () => (await session.get({ parked: null })).parked;
 const setParked = (parked) => session.set({ parked });
@@ -103,6 +104,9 @@ async function park() {
 }
 
 async function unpark() {
+  // A focus event can arrive before tabs.create() resolves. Wait for the
+  // placeholder ID so the newly created tab cannot be left behind.
+  if (parking) await parking;
   const parked = await getParked();
   if (!parked) return;
   await setParked(null);
@@ -135,9 +139,23 @@ browser.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === browser.windows.WINDOW_ID_NONE) {
     blurTimer = setTimeout(() => {
       blurTimer = null;
-      park().catch(() => {});
+      if (parking) return;
+      parking = park().catch(() => {}).finally(() => {
+        parking = null;
+      });
     }, BLUR_GRACE_MS);
   } else {
+    unpark().catch(() => {});
+  }
+});
+
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.enabled?.newValue === false || changes.appSwitch?.newValue === false) {
+    if (blurTimer !== null) {
+      clearTimeout(blurTimer);
+      blurTimer = null;
+    }
     unpark().catch(() => {});
   }
 });

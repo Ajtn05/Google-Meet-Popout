@@ -185,7 +185,7 @@
     </section>
 
     <div class="row">
-      <label for="enabled">Pop out on tab switch</label>
+      <label for="enabled">Enable Meet Popout</label>
       <input type="checkbox" id="enabled" />
     </div>
 
@@ -203,16 +203,16 @@
       <input type="checkbox" id="showButton" />
     </div>
     <div class="hint sub">
-      On by default. The button appears in the meeting and opens the controls
-      window with a direct click.
+      On by default. One click opens a controls window with participant videos,
+      profile photos or initials, and a stage view.
     </div>
 
     <details>
       <summary>Required setup</summary>
       <p>
-        This drives Firefox's own auto Picture-in-Picture, which ships turned
-        <b>off</b>. Open <b>about:config</b> and set this to <b>true</b> —
-        nothing works until you do:
+        Automatic video PiP uses Firefox's own feature, which ships turned
+        <b>off</b>. Open <b>about:config</b> and set this to <b>true</b>.
+        The one-click controls window works without this setting:
       </p>
       <code>media.videocontrols.picture-in-picture.enable-when-switching-tabs.enabled</code>
       <p>It is also in Settings → General → Browsing.</p>

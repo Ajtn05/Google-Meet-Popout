@@ -91,17 +91,37 @@ async function refresh() {
     return;
   }
   if (!status.enabled) {
-    show("", "Turned off", "Enable it above to pop out on tab switch.");
-    return;
-  }
-  if (!status.hasSource) {
-    show("warn", "Waiting for a meeting", "No playing video found yet.");
+    show("", "Turned off", "Enable Meet Popout above to use either window.");
     return;
   }
   showControls(status.controls);
+  if (status.docPipOpen) {
+    show(
+      status.pipFallback ? "warn" : "ok",
+      status.pipFallback ? "Video-only fallback" : "Controls window open",
+      status.pipFallback
+        ? `Meet controls failed to load: ${status.pipError || "unknown error"}`
+        : "The meeting stays in its floating window."
+    );
+    return;
+  }
+  if (status.pipError) {
+    show("warn", "Popout could not stay open", status.pipError);
+    return;
+  }
+  if (!status.hasSource) {
+    show(
+      "warn",
+      status.controls?.leave ? "Meeting has no video yet" : "Waiting for a meeting",
+      status.controls?.leave
+        ? "The controls window can still open; automatic video PiP needs a playing tile."
+        : "No playing video found yet."
+    );
+    return;
+  }
 
   if (status.shadowReady) {
-    show("ok", "Ready", "Switch tabs and the meeting will pop out.");
+    show("ok", "Video ready", "Switch tabs. Automatic PiP also needs the Firefox setting below.");
     return;
   }
   show(

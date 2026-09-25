@@ -1,9 +1,9 @@
 # Meet Popout
 
-This extension gives Firefox and Zen the same Google Meet behaviour as Chrome.
-When you leave the Meet tab, the meeting moves into a floating
-Picture-in-Picture window. When you return to the tab, the meeting returns to
-the page.
+This extension brings Google Meet popouts to Firefox and Zen. Switching tabs
+opens a floating video window, and returning to Meet closes it. A separate
+one-click window adds microphone, camera, and leave controls. Firefox cannot
+automatically open that controls window in the same way Chrome can.
 
 ## How it works
 
@@ -90,20 +90,21 @@ you want the meeting to keep floating after you leave Firefox.
 
 ## Required setup
 
-Firefox disables auto-PiP by default. `browser/app/profile/firefox.js` sets:
+Automatic video PiP requires Firefox's auto-PiP setting. Firefox disables it
+by default. `browser/app/profile/firefox.js` sets:
 
 ```
 pref("media.videocontrols.picture-in-picture.enable-when-switching-tabs.enabled", false);
 ```
 
-Open `about:config` and set this pref before you use the extension:
+Open `about:config` and set this pref before using automatic mode:
 
 ```
 media.videocontrols.picture-in-picture.enable-when-switching-tabs.enabled = true
 ```
 
-The same setting is available in Settings -> General -> Browsing. This is the
-only pref the extension needs.
+The same setting is available in Settings -> General -> Browsing. The one-click
+controls window works without this setting.
 
 ## Install
 
@@ -130,8 +131,7 @@ Firefox and Zen install signed extensions only. You have two options.
   ```
   This command writes a signed `.xpi` file to `web-ext-artifacts/`. That file
   installs permanently and updates itself. It stays private to you, because
-  addons.mozilla.org does not publish unlisted add-ons. An unsigned
-  `web-ext-artifacts/meet_popout-1.3.0.zip` file is already built for upload.
+  addons.mozilla.org does not publish unlisted add-ons.
 
 - **Or disable signature enforcement**, if your build permits it. Set
   `xpinstall.signatures.required` to `false` in `about:config`. Then install
@@ -142,8 +142,8 @@ Firefox and Zen install signed extensions only. You have two options.
 ## Use
 
 Join a meeting, then switch to another tab. By default the popout shows the
-active speaker, or whatever else is on the main stage, including a screen
-share. Switch back to the meeting tab and the video returns to the page.
+largest visible participant or presentation tile outside your self-view.
+Switch back to the meeting tab and the video returns to the page.
 
 Click the toolbar icon to choose what the popout shows. The choice is presented
 as four source cards so its fallback behaviour is visible before you leave the
@@ -156,15 +156,16 @@ meeting:
 - **My camera** shows your self-view.
 - **Largest video tile** shows the largest visible tile.
 
-The extension saves your choice. The choice applies to the automatic popout
-and to the optional controls window. Screen-share detection uses the media
+The extension saves your choice. It selects the automatic video popout and the
+stage view in the controls window. The controls window opens in a participant
+gallery by default. Screen-share detection uses the media
 track's display-capture data and, when Firefox does not retain it for a remote
 participant, the track label as a fallback.
 
 ## If no popout appears
 
-Check the required pref above first. Firefox disables it by default, and
-nothing works without it.
+For automatic video PiP, check the required pref above first. Firefox disables
+it by default. The one-click controls window does not depend on this pref.
 
 The popup shows **"Ready (fallback mode)"** if the extension could not make
 the shadow element playable. The extension then focuses Meet's real video
@@ -217,16 +218,20 @@ mode is both automatic and fully controllable.
 ### With controls
 
 Click the **Pop out** button in the meeting. It is shown by default and can be
-hidden from the toolbar popup. The window shows live video and has
-microphone, camera and hang-up buttons. The button icons show Meet's real
-state. The controls window stays open through tab switches and
-application switches, and it shows the active speaker. This mode replaces the
+hidden from the toolbar popup. The window shows up to four participant tiles,
+including live cameras and profile photos or initials when cameras are off.
+The gallery button switches between those tiles and the selected stage video.
+When more than four tiles are visible, the window shows a count of the others.
+Microphone, camera, and hang-up buttons control the meeting; the first two
+show Meet's real state. The controls window stays open through tab switches and
+application switches. This mode replaces the
 automatic mode, so the shadow element and the placeholder tab are both
 inactive while the window is open.
 
 The controls window can also open before Meet has a visible video tile. It
-shows a waiting message and attaches the selected source when one becomes
-available.
+shows any available participant profiles, or a waiting message until a tile
+appears. The gallery is limited to participants whose tiles Meet currently
+renders in the page.
 
 The window inherits Meet's Content Security Policy. The extension therefore
 builds the window's interface through the CSSOM instead of `<style>` elements,
@@ -234,7 +239,9 @@ because a strict `style-src` rejects those elements.
 
 ### Automatic
 
-This mode needs no click, but it shows video only. Its mute button still
+This mode needs no click, but Firefox's video PiP can show only one video
+source, so it cannot display the participant gallery or profile photos. Its
+mute button still
 controls your microphone. Firefox calls `setMuted()`. With no site wrapper
 present, that call sets `video.muted` on the shadow element, and the content
 script receives a `volumechange` event. The extension maps the state in both
@@ -277,20 +284,17 @@ host.
   Meet can change its markup, or it can stop marking a self-view as mirrored
   in an unusual layout. If that happens, select **My camera**, **Shared
   screen**, or **Largest video tile** in the toolbar popup.
-- **The extension fixes the speaker at the moment the window opens.** The
-  extension stops its checks after the tab becomes hidden. If the active
-  speaker changes while you are away, the window continues to show the speaker
-  it selected. To follow the speaker live, the extension must replace the
-  shadow element's video track under an open PiP window. That may well work,
-  but it can also make the window go black. It is therefore not enabled
-  without verification. To test it, remove the `stopPolling()` call in
-  `onVisibilityChange`.
+- **Automatic video PiP follows Meet's visible stage tile.** The extension
+  checks for changes while the tab is hidden and swaps the video track when
+  Meet changes the stage. Meet's internal active-speaker signal is not exposed,
+  so this is based on the tile layout rather than that signal.
 
 ## Layout
 
 ```
 manifest.json      MV3 manifest
 src/content.js     shadow element and focus handling (the core mechanism)
+src/participant-tiles.js  visible participant and profile discovery
 src/background.js  placeholder tab for application switches
 src/parked.html    the placeholder tab
 src/popup.html     toolbar popup
@@ -298,4 +302,4 @@ src/popup.js       status and switches
 icons/icon.svg
 ```
 
-`npx web-ext lint --self-hosted` reports 0 errors and 0 warnings.
+Run `node --test tests/*.test.js` to check the state and participant-selection logic.
